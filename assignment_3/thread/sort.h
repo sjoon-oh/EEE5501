@@ -12,6 +12,7 @@
 #include <iostream>
 #include <iomanip>
 #include <vector>
+// #include <iterator>
 
 // For sync
 #include <mutex>
@@ -24,11 +25,26 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
     T* sorted_arr = new T[num_data];
 
     // Thread related values.
-    // worker_list stores the thread objects,
+    // wkr_list stores the thread objects,
     // mtx and cv are used for synchronizing multiple threads, 
     // especially when merging operation.
-    std::vector<std::thread> worker_list(num_threads);
-    worker_list.reserve(num_threads); // Reserve size
+    struct t_info {
+        bool is_active = true; // Is thread active?
+
+        unsigned steps = 0; // Index value to jump to execute gather.
+        unsigned start_idx = 0; // Starting index of target range
+        unsigned end_idx = 0; // Ending index of target range.
+    };
+
+    std::vector<struct t_info> wkr_stat(num_threads); // Worker Status
+    for (unsigned index = 0; index < num_threads; index++)
+        wkr_stat[index].steps = !bool(index % 2);
+    // For instance, the even index waits for the very next tidx at gather.
+    // At first layer, tidx 0 waits for 1, tidx 4 waits for 5.
+    // Even tidx waits to operate gather_fn, while the others just kills themselves.
+
+    std::vector<std::thread> wkr_list(num_threads);
+    wkr_list.reserve(num_threads); // Reserve size
 
     // Locks for thread control variable (is_active, steps) 
     // and element arrays (array, merged_array)
@@ -37,23 +53,6 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
 
 #define T_LOCK      t_mtx.lock();
 #define T_UNLOCK    t_mtx.unlock();
-    
-    // Reduction Helper(Merge Operations)
-    // Variable is_active and steps syncs the reduction operations.
-    bool is_active[num_threads];
-    unsigned steps[num_threads];
-    
-    std::fill_n(is_active, num_threads, true); // Initialize with all trues
-    for (unsigned t_idx = 0; t_idx < num_threads; t_idx++)
-        steps[t_idx] = !bool(t_idx % 2); // Steps are what to wait.
-    // For instance, the even index waits for the very next tidx.
-    // tidx 0 waits for 1, tidx 4 waits for 5.
-    // Even tidx waits to operate gather_fn, while the other just kills itself.
-    
-    // temp
-    std::mutex out;
-#define LOCK out.lock();
-#define UNLOCK out.unlock();
 
     // First function variable: gather_fn
     // - gathers separated array
@@ -72,31 +71,32 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                     if (array[left_idx] <= array[right_idx]) 
                         sorted_arr[sort_idx++] = array[left_idx++];
                     else sorted_arr[sort_idx++] = array[right_idx++];
+                } // Break it into half, and align them to the new array: sorted_arr
+
+                if (left_idx > mid_idx) // Case when right-hand side have extras.
+                    std::copy( // Defined in <algorithm>
+                        sorted_arr + start_idx, // begin()
+                        sorted_arr + sort_idx, // end()
+                        array + start_idx); // destination begin()
+                    // In this case, the rest of upper part of the sub-array has been already sorted.
+                    // Thus, single copy operation is needed that targets the whole partition.
+
+                else { // Case when left-hand side have extras.
+                    std::copy( // Move within array
+                        array + left_idx,
+                        array + mid_idx + 1,
+                        array + sort_idx);
+
+                    std::copy( // Overwrite the rest.
+                        sorted_arr + start_idx, 
+                        sorted_arr + sort_idx, 
+                        array + start_idx); 
                 }
 
-                if (left_idx > mid_idx)
-                    for(int idx = right_idx; idx <= end_idx; idx++)
-                        sorted_arr[sort_idx++] = array[idx];
-
-                else
-                    for(int idx = left_idx; idx <= mid_idx; idx++)
-                        sorted_arr[sort_idx++] = array[idx];
-
-                // std::copy(sorted_arr + start_idx, sorted_arr + end_idx, array + start_idx);
-                for (int idx = start_idx; idx <= end_idx; idx++)
-                    array[idx] = sorted_arr[idx];
-
-                // LOCK
-                // std::cout 
-                //     << "\tgather_fn: (" << std::setw(8) << start_idx 
-                //     << ", " << std::setw(8) << mid_idx
-                //     << ", " << std::setw(8) << end_idx 
-                //     << ")" << std::endl;
-
-                // for(int idx = start_idx; idx < end_idx; idx++)
-                //     std::cout << "\t" << *(sorted_arr + idx) << " \n";
-                // std::cout << std::endl;
-                // UNLOCK
+                // In this case, aligned part exists in the lower-half part of the sub-array.
+                // Thus, two operation should be used, the first that moves lower-aligned part up,
+                // and the second that copies sorted partition through while-scope done at 
+                // the top of this function.
         };
 
     // Second function variable: msort_fn 
@@ -110,8 +110,8 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                 const int mid_idx = (start_idx + end_idx) / 2;
 
                 if (start_idx < end_idx) {
-                    msort_fn(start_idx, mid_idx);
-                    msort_fn(mid_idx + 1, end_idx);
+                    msort_fn(start_idx, mid_idx); // Sort left half
+                    msort_fn(mid_idx + 1, end_idx); // Sort right half
 
                     gather_fn(start_idx, mid_idx, end_idx);
                 }                
@@ -124,24 +124,24 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                 const unsigned tidx, // Thread index
                 const unsigned num_data // Total # of elements
             ) mutable {
-
                 const int idx_step = num_data / num_threads;
-                const int idx_start = tidx * idx_step;
-                int idx_end;
 
-                if (num_data % num_threads) idx_end = num_data - 1;
-                else idx_end = (tidx + 1) * idx_step - 1;
-                
-                msort_fn(idx_start, idx_end);
+                wkr_stat[tidx].start_idx = tidx * idx_step;
+                wkr_stat[tidx].end_idx = tidx == num_threads - 1 ?
+                    num_data - 1 : (tidx + 1) * idx_step - 1;
+
+                int neighbor_start_idx; // Neighbor range starting index becomes the new mid_idx.
+
                 // First, each thread sorts partial array of allocated range to itself.
                 // The merge sort algorithm is used in this phase.
+                msort_fn(
+                    wkr_stat[tidx].start_idx, 
+                    wkr_stat[tidx].end_idx);
             
-            while(1) {
+            for (; ; ) {
 
-                T_LOCK // Lock the variables first.
-
-                if (steps[tidx] == 0 || 
-                    steps[tidx] == num_threads) {
+                if (wkr_stat[tidx].steps == 0 || 
+                    wkr_stat[tidx].steps == num_threads) {
                     // Two cases:
                     // Case when the thread has no jump steps: 
                     //  in other words, the thread does not have to wait for another thread
@@ -149,53 +149,53 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                     //  This happens when the last thread (specifically thread tidx = 0)
                     //  holds the jump step of num_threads, which does not exist.
                     //  Thus, the second condition is just for thread tidx = 0.
-
-                    is_active[tidx] = false;
-                    steps[tidx] = 0;
-                    T_UNLOCK // Remove the lock
+                    wkr_stat[tidx].is_active = false;
+                    wkr_stat[tidx].steps = 0;
                     
                     cv.notify_all(); // Wake all up!
                     // Each should wake every threads up when they are killed.
-
                     break;
 
                 } else { // Sleep. It's not your turn.
-                    T_UNLOCK // First unlock
 
                     { // Scoped. For automatic lock release.
                         std::unique_lock<std::mutex> lk_cv(t_mtx);
-                        cv.wait(lk_cv, [&]{ return !is_active[tidx + steps[tidx]]; });
+                        cv.wait(lk_cv, 
+                            [&]{ return !wkr_stat[tidx + wkr_stat[tidx].steps].is_active; });
                     }
-                    
-                    idx_end = (tidx + steps[tidx] * 2) * idx_step - 1;
-                    // idx_end = unsigned(idx_end) + 1 == num_data ? 
-                    //     idx_end : (tidx + steps[tidx] * 2) * idx_step - 1;
 
-                    T_LOCK {
-                        if (tidx % (steps[tidx] * 4)) steps[tidx] = 0;
-                        else steps[tidx] *= 2;
+                    T_LOCK { // Lock for the use of steps[]
+                        neighbor_start_idx = wkr_stat[tidx + wkr_stat[tidx].steps].start_idx;
+                        wkr_stat[tidx].end_idx = wkr_stat[tidx + wkr_stat[tidx].steps].end_idx;
                     } T_UNLOCK
+
+                    // Outside of the above scope does not require lock,
+                    // since each thread only reads member 'end_idx' info of other threads.
+
+                    // Update the status
+                    if (tidx % (wkr_stat[tidx].steps * 4)) wkr_stat[tidx].steps = 0;
+                    else wkr_stat[tidx].steps *= 2;
                     
-                    // Lock is not needed. Only index of its own thread id are accessed. 
-                    // No one else writes it.
-                    // Call the merge!
-                    gather_fn(idx_start, (idx_start + idx_end) / 2, idx_end);
+                    // Gather the aligned sub-array that has been given up by neighbor thread.
+                    gather_fn(
+                        wkr_stat[tidx].start_idx, 
+                        neighbor_start_idx - 1,
+                        wkr_stat[tidx].end_idx);
                 }
             }
         };
 
     // Hey thread slaves, get to work!
     for (unsigned index = 0; index < num_threads; index++) {
-        worker_list.emplace_back(
+        wkr_list.emplace_back(
             std::thread(work_fn, index, num_data)
         ); // Give work_fn with each thread index and number of data.
         // These arguments are constants.
     }
     
     // Wait until all are finished.
-    for (auto& thread : worker_list) if (thread.joinable()) thread.join();
-
-    delete[] sorted_arr;
+    for (auto& thread : wkr_list) if (thread.joinable()) thread.join();
+    delete[] sorted_arr; // Wrap up
 }
 
 #endif
