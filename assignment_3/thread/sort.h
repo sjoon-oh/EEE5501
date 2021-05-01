@@ -14,18 +14,13 @@
 #include <vector>
 
 // For sync
-#include <chrono>
 #include <mutex>
 #include <condition_variable>
 
-#include <cstdlib>
-
 template <typename T>
 void sort(T *array, const size_t num_data, const unsigned num_threads) {
-
-    // The array is integer type.
+    // The array is integer type (T).
     // The number of data is 4000000
-    T* merged_arr = new T[num_data]();
 
     // Thread related values.
     // worker_list stores the thread objects,
@@ -36,11 +31,11 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
 
     // Locks for thread control variable (is_active, steps) 
     // and element arrays (array, merged_array)
-    std::mutex t_mtx, a_mtx; 
+    std::mutex t_mtx;
     std::condition_variable cv; // For wait
 
-#define T_LOCK  t_mtx.lock();
-#define T_UNLOCK  t_mtx.unlock();
+#define T_LOCK      t_mtx.lock();
+#define T_UNLOCK    t_mtx.unlock();
     
     // Reduction Helper(Merge Operations)
     // Variable is_active and steps syncs the reduction operations.
@@ -50,42 +45,67 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
     std::fill_n(is_active, num_threads, true); // Initialize with all trues
     for (unsigned t_idx = 0; t_idx < num_threads; t_idx++)
         steps[t_idx] = !bool(t_idx % 2); // Steps are what to wait.
+    // For instance, the even index waits for the very next tidx.
+    // tidx 0 waits for 1, tidx 4 waits for 5.
+    // Even tidx waits to operate gather_fn, while the other just kills itself.
     
     // temp
     std::mutex out;
 #define LOCK out.lock();
 #define UNLOCK out.unlock();
 
-    // First function variable: sort_fn 
-    // - sorts the array in a given range.
-    std::function<void(const int, const int, const int)> 
-        sort_fn = [&](
+    // First function variable: gather_fn
+    // - gathers separated array
+    std::function<void(const int, const int, const int)>
+        gather_fn = [&](
                 const int t_idx,
                 const int start_idx,
                 const int end_idx
             ) mutable {
-                out.lock();
-                std::cout << "Sorted [" << t_idx << "]: (" << start_idx 
-                    << ", "<< end_idx << ")" << std::endl;
-                out.unlock();
+
+                LOCK
+                std::cout 
+                    << "\tgather_fn [" << t_idx 
+                    << "]: (" << start_idx 
+                    << ", " << end_idx 
+                    << ")" << std::endl;
+                UNLOCK
         };
 
-    // Second function variable: reduction_fn
-    // - merges separated array
-    std::function<void(const int, const int, const int)>
-        merge_fn = [&](
+    // Second function variable: msort_fn 
+    // - sorts the array in a given range.
+    std::function<void(const int, const int, const int)> 
+        msort_fn = [&](
                 const int t_idx,
                 const int start_idx,
                 const int end_idx
             ) mutable {
-                out.lock();
-                std::cout << "\tMerged [" << t_idx << "]: (" << start_idx << ", "
-                    << end_idx << ")" << std::endl;
-                out.unlock();
+                
+                const int mid_idx = (start_idx + end_idx) / 2;
+                int arr_cpy[end_idx - start_idx] = { 0, };
+
+                arr_cpy[0] = mid_idx;
+                
+
+                if (start_idx < end_idx) {
+
+                    msort_fn(t_idx, start_idx, mid_idx);
+                    msort_fn(t_idx, mid_idx + 1, end_idx);
+
+                    // std::copy((array + start_idx), (array + start_idx + end_idx), arr_cpy);
+                }
+
+                LOCK
+                std::cout 
+                    << "msort_fn [" << t_idx 
+                    << "]: (" << start_idx 
+                    << ", "<< end_idx 
+                    << ")" << std::endl;
+                UNLOCK
         };
 
     // Third function variable: work_fn 
-    // - wrapper function for each thread.
+    // - wrapper executable function thrown to each thread.
     std::function<void(const unsigned, const unsigned)> 
         work_fn = [&](
                 const unsigned tidx, // Thread index
@@ -96,16 +116,15 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                 const int idx_start = tidx * idx_step;
                 int idx_end = (tidx + 1) * idx_step - 1;
                 
-                // Sort function!
-                sort_fn(tidx, idx_start, idx_end);
+                msort_fn(tidx, idx_start, idx_end); 
+                // First, each thread sorts partial array of allocated range to itself.
+                // The merge sort algorithm is used in this phase.
             
             while(1) {
                 
                 // Partial-merge
                 
 
-                // Put reduction here.
-                // Each thread merges 
                 
                 T_LOCK
                 if (steps[tidx] == 0 || 
@@ -145,7 +164,7 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                     // Lock is not needed. Only index of its own thread id are accessed. 
                     // No one else writes it.
                     // Call the merge!
-                    merge_fn(tidx, idx_start, idx_end);
+                    gather_fn(tidx, idx_start, idx_end);
                 }
             }
         };
@@ -163,20 +182,6 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
     
     // Wait until all are finished.
     for (auto& thread : worker_list) if (thread.joinable()) thread.join();
-
-    delete[] merged_arr; // Delete
 }
 
 #endif
-
-// LOCK {
-//     std::cout << "\t\tACTV: ";
-//     for (unsigned i = 0; i < num_threads; i++)
-//         std::cout << std::setw(3) << is_active[i];
-//     std::cout << std::endl;
-
-//     std::cout << "\t\tSTEP: ";
-//     for (unsigned i = 0; i < num_threads; i++)
-//         std::cout << std::setw(3) << steps[i];
-//     std::cout << std::endl;
-// } UNLOCK
