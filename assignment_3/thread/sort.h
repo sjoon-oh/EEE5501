@@ -21,6 +21,7 @@ template <typename T>
 void sort(T *array, const size_t num_data, const unsigned num_threads) {
     // The array is integer type (T).
     // The number of data is 4000000
+    T* sorted_arr = new T[num_data];
 
     // Thread related values.
     // worker_list stores the thread objects,
@@ -58,50 +59,62 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
     // - gathers separated array
     std::function<void(const int, const int, const int)>
         gather_fn = [&](
-                const int t_idx,
                 const int start_idx,
+                const int mid_idx,
                 const int end_idx
             ) mutable {
 
-                LOCK
-                std::cout 
-                    << "\tgather_fn [" << t_idx 
-                    << "]: (" << start_idx 
-                    << ", " << end_idx 
-                    << ")" << std::endl;
-                UNLOCK
+                int left_idx = start_idx;
+                int right_idx = mid_idx + 1;
+                int sort_idx = start_idx;
+
+                while (left_idx <= mid_idx && right_idx <= end_idx) {
+                    if (array[left_idx] <= array[right_idx]) 
+                        sorted_arr[sort_idx++] = array[left_idx++];
+                    else sorted_arr[sort_idx++] = array[right_idx++];
+                }
+
+                if (left_idx > mid_idx)
+                    for(int idx = right_idx; idx <= end_idx; idx++)
+                        sorted_arr[sort_idx++] = array[idx];
+
+                else
+                    for(int idx = left_idx; idx <= mid_idx; idx++)
+                        sorted_arr[sort_idx++] = array[idx];
+
+                // std::copy(sorted_arr + start_idx, sorted_arr + end_idx, array + start_idx);
+                for (int idx = start_idx; idx <= end_idx; idx++)
+                    array[idx] = sorted_arr[idx];
+
+                // LOCK
+                // std::cout 
+                //     << "\tgather_fn: (" << std::setw(8) << start_idx 
+                //     << ", " << std::setw(8) << mid_idx
+                //     << ", " << std::setw(8) << end_idx 
+                //     << ")" << std::endl;
+
+                // for(int idx = start_idx; idx < end_idx; idx++)
+                //     std::cout << "\t" << *(sorted_arr + idx) << " \n";
+                // std::cout << std::endl;
+                // UNLOCK
         };
 
     // Second function variable: msort_fn 
     // - sorts the array in a given range.
-    std::function<void(const int, const int, const int)> 
+    std::function<void(const int, const int)> 
         msort_fn = [&](
-                const int t_idx,
                 const int start_idx,
                 const int end_idx
             ) mutable {
                 
                 const int mid_idx = (start_idx + end_idx) / 2;
-                int arr_cpy[end_idx - start_idx] = { 0, };
-
-                arr_cpy[0] = mid_idx;
-                
 
                 if (start_idx < end_idx) {
+                    msort_fn(start_idx, mid_idx);
+                    msort_fn(mid_idx + 1, end_idx);
 
-                    msort_fn(t_idx, start_idx, mid_idx);
-                    msort_fn(t_idx, mid_idx + 1, end_idx);
-
-                    // std::copy((array + start_idx), (array + start_idx + end_idx), arr_cpy);
-                }
-
-                LOCK
-                std::cout 
-                    << "msort_fn [" << t_idx 
-                    << "]: (" << start_idx 
-                    << ", "<< end_idx 
-                    << ")" << std::endl;
-                UNLOCK
+                    gather_fn(start_idx, mid_idx, end_idx);
+                }                
         };
 
     // Third function variable: work_fn 
@@ -116,26 +129,23 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                 const int idx_start = tidx * idx_step;
                 int idx_end = (tidx + 1) * idx_step - 1;
                 
-                msort_fn(tidx, idx_start, idx_end); 
+                msort_fn(idx_start, idx_end); 
                 // First, each thread sorts partial array of allocated range to itself.
                 // The merge sort algorithm is used in this phase.
             
             while(1) {
-                
-                // Partial-merge
-                
 
-                
-                T_LOCK
+                T_LOCK // Lock the variables first.
+
                 if (steps[tidx] == 0 || 
                     steps[tidx] == num_threads) {
-                        // Two cases:
-                        // Case when the thread has no jump steps: 
-                        //  in other words, the thread does not have to wait for another thread
-                        // Case when the thread has the step of num_threads.
-                        //  This happens when the last thread (specifically thread tidx = 0)
-                        //  holds the jump step of num_threads, which does not exist.
-                        //  Thus, the second condition is just for thread tidx = 0.
+                    // Two cases:
+                    // Case when the thread has no jump steps: 
+                    //  in other words, the thread does not have to wait for another thread
+                    // Case when the thread has the step of num_threads.
+                    //  This happens when the last thread (specifically thread tidx = 0)
+                    //  holds the jump step of num_threads, which does not exist.
+                    //  Thus, the second condition is just for thread tidx = 0.
 
                     is_active[tidx] = false;
                     steps[tidx] = 0;
@@ -164,13 +174,10 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                     // Lock is not needed. Only index of its own thread id are accessed. 
                     // No one else writes it.
                     // Call the merge!
-                    gather_fn(tidx, idx_start, idx_end);
+                    gather_fn(idx_start, (idx_start + idx_end) / 2, idx_end);
                 }
             }
         };
-
-
-
 
     // Hey thread slaves, get to work!
     for (unsigned index = 0; index < num_threads; index++) {
@@ -182,6 +189,8 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
     
     // Wait until all are finished.
     for (auto& thread : worker_list) if (thread.joinable()) thread.join();
+
+    delete[] sorted_arr;
 }
 
 #endif
