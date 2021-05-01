@@ -127,9 +127,12 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
 
                 const int idx_step = num_data / num_threads;
                 const int idx_start = tidx * idx_step;
-                int idx_end = (tidx + 1) * idx_step - 1;
+                int idx_end;
+
+                if (num_data % num_threads) idx_end = num_data - 1;
+                else idx_end = (tidx + 1) * idx_step - 1;
                 
-                msort_fn(idx_start, idx_end); 
+                msort_fn(idx_start, idx_end);
                 // First, each thread sorts partial array of allocated range to itself.
                 // The merge sort algorithm is used in this phase.
             
@@ -163,10 +166,12 @@ void sort(T *array, const size_t num_data, const unsigned num_threads) {
                         std::unique_lock<std::mutex> lk_cv(t_mtx);
                         cv.wait(lk_cv, [&]{ return !is_active[tidx + steps[tidx]]; });
                     }
+                    
+                    idx_end = (tidx + steps[tidx] * 2) * idx_step - 1;
+                    // idx_end = unsigned(idx_end) + 1 == num_data ? 
+                    //     idx_end : (tidx + steps[tidx] * 2) * idx_step - 1;
 
                     T_LOCK {
-                        idx_end = (tidx + steps[tidx] * 2) * idx_step - 1;
-                        
                         if (tidx % (steps[tidx] * 4)) steps[tidx] = 0;
                         else steps[tidx] *= 2;
                     } T_UNLOCK
